@@ -2,12 +2,13 @@ import { ChildProcess } from 'child_process';
 import { CronExpressionParser } from 'cron-parser';
 import fs from 'fs';
 
-import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
+import { AGENT_MODE, ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
 import {
   ContainerOutput,
   runContainerAgent,
   writeTasksSnapshot,
 } from './container-runner.js';
+import { runHostAgent } from './host-runner.js';
 import {
   getAllTasks,
   getDueTasks,
@@ -169,7 +170,8 @@ async function runTask(
   };
 
   try {
-    const output = await runContainerAgent(
+    const runFn = AGENT_MODE === 'host' ? runHostAgent : runContainerAgent;
+    const output = await runFn(
       group,
       {
         prompt: task.prompt,

@@ -131,7 +131,7 @@ export class GroupQueue {
 
   registerProcess(
     groupJid: string,
-    proc: ChildProcess,
+    proc: ChildProcess | null,
     containerName: string,
     groupFolder?: string,
   ): void {
