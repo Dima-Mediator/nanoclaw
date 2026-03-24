@@ -1,0 +1,551 @@
+#!/usr/bin/env python3
+"""
+nanoclaw — NanoClaw CLI
+
+Usage:
+  nanoclaw "What is 2+2?"                          Run agent in container
+  nanoclaw -m "deploy the latest changes"           Inject message into channel
+  nanoclaw -m -g mychannel "check the logs"         Message a specific group
+  nanoclaw -g <channel_name> "Review this code"     Run agent for a group
+  nanoclaw -g <channel_name> -s <session-id> "..."  Resume session
+  nanoclaw --list-groups                            List registered groups
+  echo "prompt" | nanoclaw --pipe                   Read from stdin
+  echo "prompt" | nanoclaw -m --pipe                Message from stdin
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+import threading
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+# ── Globals ─────────────────────────────────────────────────────────────────
+
+VERBOSE = False
+
+
+def dbg(*args):
+    if VERBOSE:
+        print("»", *args, file=sys.stderr)
+
+
+# ── Config ──────────────────────────────────────────────────────────────────
+
+
+def _find_nanoclaw_dir() -> Path:
+    """Locate the NanoClaw installation directory.
+
+    Resolution order:
+    1. NANOCLAW_DIR env var
+    2. Running NanoClaw process's cwd (from ps)
+    3. The directory containing this script (if it looks like a NanoClaw install)
+    4. ~/src/nanoclaw (legacy default)
+    """
+    if env := os.environ.get("NANOCLAW_DIR"):
+        return Path(env).expanduser()
+    # Detect running NanoClaw's directory from process table.
+    # The process command may contain paths like:
+    #   /Users/x/Documents/nanoclaw/node_modules/.bin/tsx src/index.ts
+    # We look for a nanoclaw-related path in any token.
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "command"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        for line in result.stdout.splitlines():
+            if "src/index.ts" in line and "nanoclaw" in line.lower():
+                for token in line.split():
+                    if "/nanoclaw/" not in token.lower():
+                        continue
+                    # Walk up from any path inside a nanoclaw dir to find the root
+                    p = Path(token)
+                    for parent in [p] + list(p.parents):
+                        if parent.name.lower() == "nanoclaw" or (
+                            parent.name and "nanoclaw" in parent.name.lower()
+                        ):
+                            if (parent / "store" / "messages.db").exists():
+                                return parent
+                    break  # Only check first nanoclaw-containing token
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    here = Path(__file__).resolve()
+    for parent in [here.parent, here.parent.parent]:
+        if (parent / "store" / "messages.db").exists() or (parent / ".env").exists():
+            return parent
+    return Path.home() / "src" / "nanoclaw"
+
+
+NANOCLAW_DIR = _find_nanoclaw_dir()
+DB_PATH = NANOCLAW_DIR / "store" / "messages.db"
+ENV_FILE = NANOCLAW_DIR / ".env"
+DATA_DIR = NANOCLAW_DIR / "data"
+IMAGE = "nanoclaw-agent:latest"
+
+SECRET_KEYS = [
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "OLLAMA_HOST",
+]
+
+# ── Shared helpers ──────────────────────────────────────────────────────────
+
+
+def read_env(env_file: Path, keys: list[str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    if not env_file.exists():
+        return result
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            k, _, v = line.partition("=")
+            k = k.strip()
+            if k in keys:
+                result[k] = v.strip()
+    return result
+
+
+def get_groups(db: Path) -> list[dict]:
+    conn = sqlite3.connect(db)
+    rows = conn.execute(
+        "SELECT jid, name, folder, is_main FROM registered_groups ORDER BY name"
+    ).fetchall()
+    conn.close()
+    return [
+        {"jid": r[0], "name": r[1], "folder": r[2], "is_main": bool(r[3])}
+        for r in rows
+    ]
+
+
+def find_group(groups: list[dict], query: str) -> dict | None:
+    q = query.lower()
+    for g in groups:
+        if g["name"].lower() == q or g["folder"].lower() == q:
+            return g
+    matches = [
+        g for g in groups if q in g["name"].lower() or q in g["folder"].lower()
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        names = ", ".join(f'"{g["name"]}"' for g in matches)
+        sys.exit(f"error: ambiguous group '{query}'. Matches: {names}")
+    return None
+
+
+def resolve_prompt(args) -> str | None:
+    if args.pipe or (not sys.stdin.isatty() and not args.prompt):
+        stdin_text = sys.stdin.read().strip()
+        if args.prompt:
+            return f"{args.prompt}\n\n{stdin_text}"
+        return stdin_text
+    return args.prompt
+
+
+def resolve_group(args, groups: list[dict]) -> tuple[str, str | None, bool]:
+    """Returns (jid, group_name, is_main)."""
+    jid = args.jid
+    group_name = None
+    is_main = False
+
+    if args.group:
+        g = find_group(groups, args.group)
+        if g is None:
+            sys.exit(
+                f"error: group '{args.group}' not found. Run --list-groups to see options."
+            )
+        jid = g["jid"]
+        group_name = g["name"]
+        is_main = g["is_main"]
+    elif not jid:
+        mains = [g for g in groups if g["is_main"]]
+        if mains:
+            jid = mains[0]["jid"]
+            group_name = mains[0]["name"]
+            is_main = True
+        else:
+            sys.exit(
+                "error: no group specified and no main group found. Use -g or -j."
+            )
+
+    return jid, group_name, is_main
+
+
+# ── Container runner (agent mode) ──────────────────────────────────────────
+
+
+def detect_runtime(preference: str | None) -> str:
+    if preference:
+        dbg(f"runtime: forced to {preference}")
+        return preference
+    for rt in ("container", "docker"):
+        result = subprocess.run(["which", rt], capture_output=True)
+        if result.returncode == 0:
+            dbg(
+                f"runtime: auto-detected {rt} at {result.stdout.decode().strip()}"
+            )
+            return rt
+    sys.exit(
+        "error: neither 'container' nor 'docker' found. Install one or pass --runtime."
+    )
+
+
+def read_secrets(env_file: Path) -> dict:
+    secrets = {}
+    if not env_file.exists():
+        return secrets
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            key, _, val = line.partition("=")
+            key = key.strip()
+            if key in SECRET_KEYS:
+                secrets[key] = val.strip()
+    return secrets
+
+
+def run_container(
+    runtime: str, image: str, payload: dict, timeout: int = 300
+) -> None:
+    cmd = [runtime, "run", "-i", "--rm", image]
+    dbg(f"cmd: {' '.join(cmd)}")
+
+    if VERBOSE:
+        safe = {k: v for k, v in payload.items() if k != "secrets"}
+        safe["secrets"] = {k: "***" for k in payload.get("secrets", {})}
+        dbg(f"payload: {json.dumps(safe, indent=2)}")
+
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    dbg(f"container pid: {proc.pid}")
+
+    proc.stdin.write(json.dumps(payload).encode())
+    proc.stdin.close()
+    dbg("stdin closed, waiting for response...")
+
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    done = threading.Event()
+
+    def stream_stderr():
+        for raw in proc.stderr:
+            line = raw.decode(errors="replace").rstrip()
+            if line.startswith("npm notice"):
+                continue
+            stderr_lines.append(line)
+            print(line, file=sys.stderr)
+
+    def stream_stdout():
+        for raw in proc.stdout:
+            line = raw.decode(errors="replace").rstrip()
+            stdout_lines.append(line)
+            dbg(f"stdout: {line}")
+            if line.strip() == "---NANOCLAW_OUTPUT_END---":
+                dbg("output sentinel found, terminating container")
+                done.set()
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                return
+
+    t_err = threading.Thread(target=stream_stderr, daemon=True)
+    t_out = threading.Thread(target=stream_stdout, daemon=True)
+    t_err.start()
+    t_out.start()
+
+    if not done.wait(timeout=timeout):
+        t_out.join(timeout=2)
+        if not done.is_set():
+            proc.kill()
+            sys.exit(
+                f"error: container timed out after {timeout}s (no output sentinel received)"
+            )
+
+    t_err.join(timeout=5)
+    t_out.join(timeout=5)
+    proc.wait()
+    dbg(
+        f"container done (rc={proc.returncode}), {len(stdout_lines)} stdout lines"
+    )
+    stdout = "\n".join(stdout_lines)
+
+    match = re.search(
+        r"---NANOCLAW_OUTPUT_START---\n(.*?)\n---NANOCLAW_OUTPUT_END---",
+        stdout,
+        re.DOTALL,
+    )
+    if match:
+        try:
+            data = json.loads(match.group(1))
+            status = data.get("status", "unknown")
+            if status == "success":
+                print(data.get("result", ""))
+                session_id = data.get("newSessionId") or data.get("sessionId")
+                if session_id:
+                    print(f"\n[session: {session_id}]", file=sys.stderr)
+            else:
+                print(
+                    f"[{status}] {data.get('result', '')}", file=sys.stderr
+                )
+                sys.exit(1)
+        except json.JSONDecodeError:
+            print(match.group(1))
+    else:
+        print(stdout)
+
+    if proc.returncode not in (0, None):
+        sys.exit(proc.returncode)
+
+
+# ── Message injection (-m mode) ────────────────────────────────────────────
+
+
+def inject_message(
+    db: Path, chat_jid: str, content: str, sender_name: str
+) -> str:
+    """Insert a message into the NanoClaw messages DB. Returns the message ID."""
+    msg_id = f"cli-{uuid.uuid4().hex[:12]}"
+    now = datetime.now(timezone.utc).isoformat()
+
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """INSERT OR REPLACE INTO messages
+           (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message)
+           VALUES (?, ?, ?, ?, ?, ?, 0, 0)""",
+        (msg_id, chat_jid, f"cli:{sender_name}", sender_name, content, now),
+    )
+    conn.execute(
+        """INSERT INTO chats (jid, name, last_message_time)
+           VALUES (?, ?, ?)
+           ON CONFLICT(jid) DO UPDATE SET
+             last_message_time = MAX(last_message_time, excluded.last_message_time)""",
+        (chat_jid, chat_jid, now),
+    )
+    conn.commit()
+    conn.close()
+    return msg_id
+
+
+def send_ipc_message(data_dir: Path, group_folder: str, chat_jid: str, text: str) -> bool:
+    """Send a message via IPC (NanoClaw posts it to the channel as outbound)."""
+    ipc_dir = data_dir / "ipc" / group_folder / "messages"
+    ipc_dir.mkdir(parents=True, exist_ok=True)
+    msg_file = ipc_dir / f"cli-{uuid.uuid4().hex[:8]}.json"
+    msg_file.write_text(json.dumps({
+        "type": "message",
+        "chatJid": chat_jid,
+        "text": text,
+    }))
+    return True
+
+
+def read_assistant_name() -> str:
+    env = read_env(ENV_FILE, ["ASSISTANT_NAME"])
+    return env.get("ASSISTANT_NAME", "Andy")
+
+
+def cmd_message(args, groups: list[dict]) -> None:
+    """Handle -m (message injection) mode."""
+    jid, group_name, is_main = resolve_group(args, groups)
+
+    prompt = resolve_prompt(args)
+    if not prompt:
+        sys.exit("error: no message provided.")
+
+    # For non-main groups, prepend trigger so the message loop processes it
+    assistant_name = read_assistant_name()
+    if not is_main:
+        prompt = f"@{assistant_name} {prompt}"
+
+    # Resolve group folder for IPC
+    target_group = next((g for g in groups if g["jid"] == jid), None)
+    group_folder = target_group["folder"] if target_group else "main"
+
+    # Step 1: Inject into DB (triggers the agent via the message loop)
+    if not args.no_trigger:
+        sender_name = args.name or "CLI"
+        msg_id = inject_message(DB_PATH, jid, prompt, sender_name)
+        print(f"injected ({msg_id}) — agent will pick up shortly", file=sys.stderr)
+
+    # Step 2: Post to channel via IPC (visible in Slack, posted by the running bot)
+    # This goes through NanoClaw's IPC watcher → channel.sendMessage(),
+    # which the event handler stores as is_bot_message=true (won't re-trigger).
+    if not args.no_channel:
+        sender_label = args.name or "CLI"
+        ipc_text = f"_{sender_label}:_ {prompt}"
+        if send_ipc_message(DATA_DIR, group_folder, jid, ipc_text):
+            print(f"sent to channel via IPC ({group_name or jid})", file=sys.stderr)
+        else:
+            print("warning: IPC message failed", file=sys.stderr)
+
+
+# ── Container run (default mode) ───────────────────────────────────────────
+
+
+def cmd_run(args, groups: list[dict]) -> None:
+    """Handle default (container agent) mode."""
+    jid, group_name, is_main = resolve_group(args, groups)
+
+    prompt = resolve_prompt(args)
+    if not prompt:
+        print("error: no prompt provided.", file=sys.stderr)
+        sys.exit(1)
+
+    runtime = detect_runtime(args.runtime)
+    secrets = read_secrets(ENV_FILE)
+
+    if not secrets:
+        print(
+            "warning: no secrets found in .env — agent may not be authenticated",
+            file=sys.stderr,
+        )
+
+    payload: dict = {
+        "prompt": prompt,
+        "chatJid": jid,
+        "isMain": is_main,
+        "secrets": secrets,
+    }
+    if group_name:
+        payload["groupFolder"] = group_name
+    if args.session:
+        payload["sessionId"] = args.session
+        payload["resumeAt"] = "latest"
+
+    print(f"[{group_name or jid}] running via {runtime}...", file=sys.stderr)
+    run_container(runtime, args.image, payload, timeout=args.timeout)
+
+
+# ── Main ────────────────────────────────────────────────────────────────────
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="nanoclaw",
+        description="NanoClaw CLI — run agents or inject messages into channels.",
+        epilog="Examples:\n"
+        '  nanoclaw "What is 2+2?"              Run agent\n'
+        '  nanoclaw -m "deploy latest"           Inject message into channel\n'
+        '  nanoclaw -m -g ops "check logs"       Message a specific group\n'
+        "  nanoclaw --list-groups                List groups\n",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    parser.add_argument("prompt", nargs="?", help="Prompt or message text")
+    parser.add_argument(
+        "-m",
+        "--message",
+        action="store_true",
+        help="Message mode: inject into channel (posts to Slack + triggers agent)",
+    )
+
+    # Shared options
+    parser.add_argument(
+        "-g", "--group", help="Group name or folder (fuzzy match)"
+    )
+    parser.add_argument("-j", "--jid", help="Chat JID (exact)")
+    parser.add_argument(
+        "-p",
+        "--pipe",
+        action="store_true",
+        help="Read from stdin (can combine with positional prompt as prefix)",
+    )
+    parser.add_argument(
+        "--list-groups",
+        action="store_true",
+        help="List registered groups and exit",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show debug info",
+    )
+
+    # Message mode options
+    msg_group = parser.add_argument_group("message mode (-m)")
+    msg_group.add_argument(
+        "-n",
+        "--name",
+        default=None,
+        help="Sender name (default: CLI)",
+    )
+    msg_group.add_argument(
+        "--no-channel",
+        action="store_true",
+        help="Only inject into DB, don't reflect message in channel",
+    )
+    msg_group.add_argument(
+        "--no-trigger",
+        action="store_true",
+        help="Only post to Slack, don't inject into DB (no agent trigger)",
+    )
+
+    # Container mode options
+    run_group = parser.add_argument_group("run mode (default)")
+    run_group.add_argument(
+        "-s", "--session", help="Session ID to resume"
+    )
+    run_group.add_argument(
+        "--runtime",
+        choices=["docker", "container"],
+        help="Container runtime (default: auto-detect)",
+    )
+    run_group.add_argument(
+        "--image",
+        default=IMAGE,
+        help=f"Container image (default: {IMAGE})",
+    )
+    run_group.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        metavar="SECS",
+        help="Max seconds to wait (default: 300)",
+    )
+
+    args = parser.parse_args()
+
+    global VERBOSE
+    VERBOSE = args.verbose
+
+    groups = get_groups(DB_PATH) if DB_PATH.exists() else []
+
+    if args.list_groups:
+        print(f"{'NAME':<35} {'FOLDER':<30} {'JID'}")
+        print("-" * 100)
+        for g in groups:
+            tag = " [main]" if g["is_main"] else ""
+            print(
+                f"{g['name']:<35} {g['folder']:<30} {g['jid']}{tag}"
+            )
+        return
+
+    if args.message:
+        cmd_message(args, groups)
+    else:
+        cmd_run(args, groups)
+
+
+if __name__ == "__main__":
+    main()
