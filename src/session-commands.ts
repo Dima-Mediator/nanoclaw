@@ -11,7 +11,7 @@ export function extractSessionCommand(
 ): string | null {
   let text = content.trim();
   text = text.replace(triggerPattern, '').trim();
-  if (text === '/compact') return '/compact';
+  if (text === '/compact' || text === 'compact') return '/compact';
   return null;
 }
 

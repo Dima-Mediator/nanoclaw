@@ -1,20 +1,20 @@
 ---
 name: status
-description: Quick read-only health check — session context, workspace mounts, tool availability, and task snapshot. Use when the user asks for system status or runs /status.
+description: Quick read-only health check — session context, workspace mounts, tool availability, and task snapshot. Use when the user asks for system status, says "status", or runs /status.
 ---
 
 # /status — System Status Check
 
 Generate a quick read-only status report of the current agent environment.
 
-**Main-channel check:** Only the main channel has `/workspace/project` mounted. Run:
+**Main-channel check:** Determine if this is the main channel. In container mode, `/workspace/project` is mounted only for the main channel. In host mode, the MCP server has `NANOCLAW_IS_MAIN` set. Check both:
 
 ```bash
-test -d /workspace/project && echo "MAIN" || echo "NOT_MAIN"
+if [ -d /workspace/project ]; then echo "MAIN"; elif printenv NANOCLAW_IS_MAIN 2>/dev/null | grep -q '^1$'; then echo "MAIN"; else echo "NOT_MAIN"; fi
 ```
 
 If `NOT_MAIN`, respond with:
-> This command is available in your main chat only. Send `/status` there to check system status.
+> This command is available in your main chat only. Send `status` there to check system status.
 
 Then stop — do not generate the report.
 
@@ -101,4 +101,4 @@ Present as a clean, readable message:
 
 Adapt based on what you actually find. Keep it concise — this is a quick health check, not a deep diagnostic.
 
-**See also:** `/capabilities` for a full list of installed skills and tools.
+**See also:** `capabilities` for a full list of installed skills and tools.

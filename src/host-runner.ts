@@ -409,6 +409,7 @@ export async function runHostAgent(
     ...process.env,
     HOME: path.dirname(sessionsDir), // sessions/{folder}/ — SDK finds .claude/ here
     TZ: process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone,
+    NANOCLAW_IS_MAIN: input.isMain ? '1' : '0',
   };
 
   // Inject credentials into SDK env

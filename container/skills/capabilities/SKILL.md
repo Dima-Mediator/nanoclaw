@@ -1,20 +1,20 @@
 ---
 name: capabilities
-description: Show what this NanoClaw instance can do — installed skills, available tools, and system info. Read-only. Use when the user asks what the bot can do, what's installed, or runs /capabilities.
+description: Show what this NanoClaw instance can do — installed skills, available tools, and system info. Read-only. Use when the user asks what the bot can do, what's installed, or says "capabilities" or runs /capabilities.
 ---
 
 # /capabilities — System Capabilities Report
 
 Generate a structured read-only report of what this NanoClaw instance can do.
 
-**Main-channel check:** Only the main channel has `/workspace/project` mounted. Run:
+**Main-channel check:** Determine if this is the main channel. In container mode, `/workspace/project` is mounted only for the main channel. In host mode, the MCP server has `NANOCLAW_IS_MAIN` set. Check both:
 
 ```bash
-test -d /workspace/project && echo "MAIN" || echo "NOT_MAIN"
+if [ -d /workspace/project ]; then echo "MAIN"; elif printenv NANOCLAW_IS_MAIN 2>/dev/null | grep -q '^1$'; then echo "MAIN"; else echo "NOT_MAIN"; fi
 ```
 
 If `NOT_MAIN`, respond with:
-> This command is available in your main chat only. Send `/capabilities` there to see what I can do.
+> This command is available in your main chat only. Send `capabilities` there to see what I can do.
 
 Then stop — do not generate the report.
 
@@ -97,4 +97,4 @@ Present the report as a clean, readable message. Example:
 
 Adapt the output based on what you actually find — don't list things that aren't installed.
 
-**See also:** `/status` for a quick health check of session, workspace, and tasks.
+**See also:** `status` for a quick health check of session, workspace, and tasks.

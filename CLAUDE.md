@@ -55,6 +55,12 @@ npm run build        # Compile TypeScript
 ./container/build.sh # Rebuild agent container
 ```
 
+After changing source files or container skills, rebuild and restart the service for changes to take effect:
+
+```bash
+npm run build && launchctl kickstart -k gui/$(id -u)/com.nanoclaw
+```
+
 Service management:
 ```bash
 # macOS (launchd)
@@ -68,10 +74,6 @@ systemctl --user stop nanoclaw
 systemctl --user restart nanoclaw
 ```
 
-## Troubleshooting
+## Host Mode
 
-**WhatsApp not connecting after upgrade:** WhatsApp is now a separate skill, not bundled in core. Run `/add-whatsapp` (or `npx tsx scripts/apply-skill.ts .claude/skills/add-whatsapp && npm run build`) to install it. Existing auth credentials and groups are preserved.
-
-## Container Build Cache
-
-The container buildkit caches the build context aggressively. `--no-cache` alone does NOT invalidate COPY steps — the builder's volume retains stale files. To force a truly clean rebuild, prune the builder then re-run `./container/build.sh`.
+In this setup, the agent is running in the Host Mode - not in Docker
