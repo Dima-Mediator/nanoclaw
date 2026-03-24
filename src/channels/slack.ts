@@ -261,6 +261,97 @@ export class SlackChannel implements Channel {
     }
   }
 
+  /**
+   * Resolve a channel name (e.g., "healthcheck-prd" or "#healthcheck-prd") to a JID.
+   * Returns null if the bot is not a member or the channel doesn't exist.
+   */
+  async resolveChannelByName(
+    name: string,
+  ): Promise<{ jid: string; name: string } | null> {
+    const normalized = name.replace(/^#/, '').toLowerCase();
+
+    try {
+      let cursor: string | undefined;
+      do {
+        const result = await this.app.client.conversations.list({
+          types: 'public_channel,private_channel',
+          exclude_archived: true,
+          limit: 200,
+          cursor,
+        });
+
+        for (const ch of result.channels || []) {
+          if (
+            ch.id &&
+            ch.name &&
+            ch.is_member &&
+            ch.name.toLowerCase() === normalized
+          ) {
+            return { jid: `slack:${ch.id}`, name: ch.name };
+          }
+        }
+
+        cursor = result.response_metadata?.next_cursor || undefined;
+      } while (cursor);
+    } catch (err) {
+      logger.error({ name, err }, 'Failed to resolve Slack channel by name');
+    }
+
+    return null;
+  }
+
+  /**
+   * Read channel history from Slack API.
+   * Bot must be a member of the channel.
+   */
+  async readHistory(
+    jid: string,
+    oldest: string,
+    latest: string,
+    limit: number,
+  ): Promise<{
+    ok: boolean;
+    messages?: Array<{ sender: string; text: string; timestamp: string }>;
+    error?: string;
+  }> {
+    const channelId = jid.replace(/^slack:/, '');
+
+    try {
+      const result = await this.app.client.conversations.history({
+        channel: channelId,
+        oldest: String(new Date(oldest).getTime() / 1000),
+        latest: String(new Date(latest).getTime() / 1000),
+        inclusive: true,
+        limit: Math.min(limit, 200),
+      });
+
+      const messages = (result.messages || [])
+        .filter((m) => m.text)
+        .reverse() // Slack returns newest-first; reverse to chronological
+        .map((m) => ({
+          sender: m.user
+            ? this.userNameCache.get(m.user) || m.user
+            : m.bot_id || 'unknown',
+          text: m.text!,
+          timestamp: new Date(parseFloat(m.ts!) * 1000).toISOString(),
+        }));
+
+      // Best-effort resolve unknown user names
+      for (const msg of messages) {
+        if (/^U[A-Z0-9]+$/.test(msg.sender)) {
+          const name = await this.resolveUserName(msg.sender);
+          if (name) msg.sender = name;
+        }
+      }
+
+      return { ok: true, messages };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      logger.error({ jid, err }, 'Failed to read Slack channel history');
+      return { ok: false, error: errMsg };
+    }
+  }
+
   private async flushOutgoingQueue(): Promise<void> {
     if (this.flushing || this.outgoingQueue.length === 0) return;
     this.flushing = true;

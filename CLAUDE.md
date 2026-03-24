@@ -4,7 +4,7 @@ Personal Claude assistant. See [README.md](README.md) for philosophy and setup. 
 
 ## Quick Context
 
-Single Node.js process with skill-based channel system. Channels (WhatsApp, Telegram, Slack, Discord, Gmail) are skills that self-register at startup. Messages route to Claude Agent SDK running in containers (Linux VMs). Each group has isolated filesystem and memory.
+Single Node.js process with skill-based channel system. Channels (WhatsApp, Telegram, Slack, Discord, Gmail) are skills that self-register at startup. Messages route to Claude Agent SDK running on the host via `src/host-runner.ts` (container mode also available via `src/container-runner.ts`). Each group has isolated filesystem and memory. IPC between the orchestrator and agent uses a file-based system (`data/ipc/{group}/`) with subdirectories: `messages/` (fire-and-forget), `tasks/` (task management), `input/` (follow-up messages), and `queries/` (request-response pattern for host API access like channel history).
 
 ## Key Files
 
@@ -15,11 +15,13 @@ Single Node.js process with skill-based channel system. Channels (WhatsApp, Tele
 | `src/ipc.ts` | IPC watcher and task processing |
 | `src/router.ts` | Message formatting and outbound routing |
 | `src/config.ts` | Trigger pattern, paths, intervals |
-| `src/container-runner.ts` | Spawns agent containers with mounts |
+| `src/host-runner.ts` | Runs agent on host via Claude Agent SDK |
+| `src/container-runner.ts` | Spawns agent containers with mounts (alternative) |
 | `src/task-scheduler.ts` | Runs scheduled tasks |
 | `src/db.ts` | SQLite operations |
 | `groups/{name}/CLAUDE.md` | Per-group memory (isolated) |
-| `container/skills/` | Skills loaded inside agent containers (browser, status, formatting) |
+| `container/agent-runner/src/ipc-mcp-stdio.ts` | MCP server providing agent tools (send_message, schedule_task, read_channel_history, etc.) |
+| `container/skills/` | Skills loaded inside agent sessions (browser, status, formatting) |
 
 ## Skills
 

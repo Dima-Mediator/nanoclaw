@@ -90,6 +90,21 @@ export interface Channel {
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
+  // Optional: resolve a channel name to a JID.
+  resolveChannelByName?(
+    name: string,
+  ): Promise<{ jid: string; name: string } | null>;
+  // Optional: read channel history from the platform API.
+  readHistory?(
+    jid: string,
+    oldest: string,
+    latest: string,
+    limit: number,
+  ): Promise<{
+    ok: boolean;
+    messages?: Array<{ sender: string; text: string; timestamp: string }>;
+    error?: string;
+  }>;
 }
 
 // Callback type that channels use to deliver inbound messages

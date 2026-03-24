@@ -13,6 +13,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 
 import {
+  AGENT_CWD,
   CONTAINER_TIMEOUT,
   DATA_DIR,
   GROUPS_DIR,
@@ -363,6 +364,7 @@ function prepareDirectories(
   fs.mkdirSync(path.join(ipcDir, 'messages'), { recursive: true });
   fs.mkdirSync(path.join(ipcDir, 'tasks'), { recursive: true });
   fs.mkdirSync(path.join(ipcDir, 'input'), { recursive: true });
+  fs.mkdirSync(path.join(ipcDir, 'queries'), { recursive: true });
 
   return { groupDir, sessionsDir, ipcDir };
 }
@@ -436,6 +438,12 @@ export async function runHostAgent(
     if (fs.existsSync(globalDir)) {
       additionalDirs.push(globalDir);
     }
+  }
+
+  // When AGENT_CWD overrides cwd, add the group dir as an additional directory
+  // so the agent still picks up the group's CLAUDE.md and context
+  if (AGENT_CWD) {
+    additionalDirs.push(groupDir);
   }
 
   if (group.containerConfig?.additionalMounts) {
@@ -541,7 +549,7 @@ export async function runHostAgent(
     for await (const message of query({
       prompt: stream,
       options: {
-        cwd: groupDir,
+        cwd: AGENT_CWD || groupDir,
         additionalDirectories:
           additionalDirs.length > 0 ? additionalDirs : undefined,
         resume: sessionId,

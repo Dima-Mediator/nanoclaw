@@ -23,6 +23,19 @@ export interface IpcDeps {
     registeredJids: Set<string>,
   ) => void;
   onTasksChanged: () => void;
+  readChannelHistory?: (
+    jid: string,
+    oldest: string,
+    latest: string,
+    limit: number,
+  ) => Promise<{
+    ok: boolean;
+    messages?: Array<{ sender: string; text: string; timestamp: string }>;
+    error?: string;
+  }>;
+  resolveChannelByName?: (
+    name: string,
+  ) => Promise<{ jid: string; name: string } | null>;
 }
 
 let ipcWatcherRunning = false;
@@ -63,6 +76,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
       const isMain = folderIsMain.get(sourceGroup) === true;
       const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
       const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
+      const queriesDir = path.join(ipcBaseDir, sourceGroup, 'queries');
 
       // Process messages from this group's IPC directory
       try {
@@ -144,6 +158,68 @@ export function startIpcWatcher(deps: IpcDeps): void {
         }
       } catch (err) {
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
+      }
+
+      // Process query requests (request-response pattern via queries/ dir)
+      try {
+        if (fs.existsSync(queriesDir)) {
+          const queryFiles = fs
+            .readdirSync(queriesDir)
+            .filter(
+              (f) => f.endsWith('.json') && !f.endsWith('.response.json'),
+            );
+          for (const file of queryFiles) {
+            const filePath = path.join(queriesDir, file);
+            const responsePath = filePath.replace(/\.json$/, '.response.json');
+
+            // Skip if already responded
+            if (fs.existsSync(responsePath)) continue;
+
+            try {
+              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              await processInputRequest(
+                data,
+                sourceGroup,
+                isMain,
+                deps,
+                responsePath,
+              );
+            } catch (err) {
+              logger.error(
+                { file, sourceGroup, err },
+                'Error processing IPC input request',
+              );
+              // Write error response so the container doesn't hang
+              const errorResponse = {
+                ok: false,
+                error: `Host processing error: ${err instanceof Error ? err.message : String(err)}`,
+              };
+              fs.writeFileSync(responsePath, JSON.stringify(errorResponse));
+            }
+          }
+
+          // Clean up old request/response pairs (older than 5 minutes)
+          const cutoff = Date.now() - 5 * 60 * 1000;
+          const allFiles = fs
+            .readdirSync(queriesDir)
+            .filter((f) => f.endsWith('.json'));
+          for (const file of allFiles) {
+            const filePath = path.join(queriesDir, file);
+            try {
+              const stat = fs.statSync(filePath);
+              if (stat.mtimeMs < cutoff) {
+                fs.unlinkSync(filePath);
+              }
+            } catch {
+              // ignore cleanup errors
+            }
+          }
+        }
+      } catch (err) {
+        logger.error(
+          { err, sourceGroup },
+          'Error reading IPC queries directory',
+        );
       }
     }
 
@@ -457,5 +533,102 @@ export async function processTaskIpc(
 
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
+  }
+}
+
+async function processInputRequest(
+  data: { type: string; [key: string]: unknown },
+  sourceGroup: string,
+  isMain: boolean,
+  deps: IpcDeps,
+  responsePath: string,
+): Promise<void> {
+  switch (data.type) {
+    case 'read_channel_history': {
+      if (!deps.readChannelHistory) {
+        fs.writeFileSync(
+          responsePath,
+          JSON.stringify({
+            ok: false,
+            error: 'No channel supports history reading',
+          }),
+        );
+        break;
+      }
+
+      let jid = data.jid as string;
+      const oldest = data.oldest as string;
+      const latest = data.latest as string;
+      const limit = (data.limit as number) || 100;
+
+      if (!jid || !oldest || !latest) {
+        fs.writeFileSync(
+          responsePath,
+          JSON.stringify({
+            ok: false,
+            error: 'Missing required fields: jid, oldest, latest',
+          }),
+        );
+        break;
+      }
+
+      // Authorization: only main group can read arbitrary channel history
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup, jid },
+          'Unauthorized read_channel_history attempt blocked',
+        );
+        fs.writeFileSync(
+          responsePath,
+          JSON.stringify({
+            ok: false,
+            error: 'Only the main group can read channel history',
+          }),
+        );
+        break;
+      }
+
+      // Resolve channel name to JID if not already a JID
+      if (!jid.includes(':') && deps.resolveChannelByName) {
+        const resolved = await deps.resolveChannelByName(jid);
+        if (!resolved) {
+          fs.writeFileSync(
+            responsePath,
+            JSON.stringify({
+              ok: false,
+              error: `Channel not found or bot not a member: ${jid}`,
+            }),
+          );
+          break;
+        }
+        logger.info(
+          { name: jid, resolvedJid: resolved.jid },
+          'Resolved channel name to JID',
+        );
+        jid = resolved.jid;
+      }
+
+      logger.info(
+        { sourceGroup, jid, oldest, latest, limit },
+        'Processing read_channel_history request',
+      );
+
+      const result = await deps.readChannelHistory(jid, oldest, latest, limit);
+      fs.writeFileSync(responsePath, JSON.stringify(result));
+      break;
+    }
+
+    default:
+      logger.warn(
+        { type: data.type, sourceGroup },
+        'Unknown IPC input request type',
+      );
+      fs.writeFileSync(
+        responsePath,
+        JSON.stringify({
+          ok: false,
+          error: `Unknown request type: ${data.type}`,
+        }),
+      );
   }
 }

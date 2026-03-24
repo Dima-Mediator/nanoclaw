@@ -721,6 +721,25 @@ async function main(): Promise<void> {
         writeTasksSnapshot(group.folder, group.isMain === true, taskRows);
       }
     },
+    readChannelHistory: async (jid, oldest, latest, limit) => {
+      const channel = findChannel(channels, jid);
+      if (!channel?.readHistory) {
+        return {
+          ok: false,
+          error: `No channel supports history for JID: ${jid}`,
+        };
+      }
+      return channel.readHistory(jid, oldest, latest, limit);
+    },
+    resolveChannelByName: async (name) => {
+      for (const ch of channels) {
+        if (ch.resolveChannelByName) {
+          const result = await ch.resolveChannelByName(name);
+          if (result) return result;
+        }
+      }
+      return null;
+    },
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();

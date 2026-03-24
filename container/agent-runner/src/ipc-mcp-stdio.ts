@@ -333,6 +333,116 @@ Use available_groups.json to find the JID for a group. The folder name must be c
   },
 );
 
+const QUERIES_DIR = path.join(IPC_DIR, 'queries');
+
+server.tool(
+  'read_channel_history',
+  `Read message history from a channel. The bot must be a member of the target channel.
+Time range is specified as minutes relative to now — this prevents unbounded reads.
+
+• minutes_ago: How far back to read (e.g., 60 = last hour). Required.
+• to_minutes_ago: End of time window in minutes ago (default: 0 = now). Use to read a specific window.
+• channel_jid: Channel JID (e.g., "slack:C0123456789") OR channel name (e.g., "healthcheck-prd" or "#healthcheck-prd"). Names are resolved automatically.
+• limit: Max messages to return (default: 100, max: 200).
+
+Example: Read last 30 minutes of #healthcheck-prd:
+  { channel_jid: "healthcheck-prd", minutes_ago: 30 }
+
+Example: Read messages from 2h ago to 1h ago:
+  { channel_jid: "slack:C...", minutes_ago: 120, to_minutes_ago: 60 }`,
+  {
+    channel_jid: z.string().describe('Channel JID (e.g., "slack:C0123456789") or channel name (e.g., "healthcheck-prd", "#healthcheck-prd")'),
+    minutes_ago: z.number().min(1).max(1440).describe('How far back to read (minutes). Max 1440 (24h).'),
+    to_minutes_ago: z.number().min(0).default(0).describe('End of window in minutes ago (default: 0 = now)'),
+    limit: z.number().min(1).max(200).default(100).describe('Max messages to return'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [{ type: 'text' as const, text: 'Only the main group can read channel history.' }],
+        isError: true,
+      };
+    }
+
+    if (args.to_minutes_ago >= args.minutes_ago) {
+      return {
+        content: [{ type: 'text' as const, text: `to_minutes_ago (${args.to_minutes_ago}) must be less than minutes_ago (${args.minutes_ago}).` }],
+        isError: true,
+      };
+    }
+
+    const now = Date.now();
+    const oldest = new Date(now - args.minutes_ago * 60 * 1000).toISOString();
+    const latest = new Date(now - args.to_minutes_ago * 60 * 1000).toISOString();
+
+    // Write request
+    fs.mkdirSync(QUERIES_DIR, { recursive: true });
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const requestFile = path.join(QUERIES_DIR, `${requestId}.json`);
+    const responseFile = path.join(QUERIES_DIR, `${requestId}.response.json`);
+
+    fs.writeFileSync(
+      requestFile,
+      JSON.stringify({
+        type: 'read_channel_history',
+        jid: args.channel_jid,
+        oldest,
+        latest,
+        limit: args.limit,
+      }),
+    );
+
+    // Poll for response (host processes on IPC_POLL_INTERVAL)
+    const pollInterval = 200; // ms
+    const timeout = 15_000; // 15s max wait
+    const start = Date.now();
+
+    while (Date.now() - start < timeout) {
+      if (fs.existsSync(responseFile)) {
+        const result = JSON.parse(fs.readFileSync(responseFile, 'utf-8'));
+
+        // Clean up
+        try { fs.unlinkSync(requestFile); } catch { /* ignore */ }
+        try { fs.unlinkSync(responseFile); } catch { /* ignore */ }
+
+        if (!result.ok) {
+          return {
+            content: [{ type: 'text' as const, text: `Error: ${result.error}` }],
+            isError: true,
+          };
+        }
+
+        const messages = result.messages || [];
+        if (messages.length === 0) {
+          return {
+            content: [{ type: 'text' as const, text: `No messages found in ${args.channel_jid} for the specified time range.` }],
+          };
+        }
+
+        const formatted = messages
+          .map((m: { sender: string; text: string; timestamp: string }) =>
+            `[${m.timestamp}] ${m.sender}: ${m.text}`,
+          )
+          .join('\n');
+
+        return {
+          content: [{ type: 'text' as const, text: `${messages.length} messages from ${args.channel_jid} (${args.minutes_ago}m ago → ${args.to_minutes_ago}m ago):\n\n${formatted}` }],
+        };
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+    }
+
+    // Timeout — clean up request
+    try { fs.unlinkSync(requestFile); } catch { /* ignore */ }
+
+    return {
+      content: [{ type: 'text' as const, text: 'Timed out waiting for channel history response from host.' }],
+      isError: true,
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

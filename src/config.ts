@@ -10,6 +10,7 @@ const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
   'AGENT_MODE',
+  'AGENT_CWD',
 ]);
 
 export const ASSISTANT_NAME =
@@ -18,6 +19,8 @@ const rawAgentMode =
   process.env.AGENT_MODE || envConfig.AGENT_MODE || 'container';
 export const AGENT_MODE: 'container' | 'host' =
   rawAgentMode === 'host' ? 'host' : 'container';
+export const AGENT_CWD: string | undefined =
+  process.env.AGENT_CWD || envConfig.AGENT_CWD || undefined;
 export const ASSISTANT_HAS_OWN_NUMBER =
   (process.env.ASSISTANT_HAS_OWN_NUMBER ||
     envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
