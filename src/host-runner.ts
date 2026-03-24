@@ -6,7 +6,11 @@
 import { ChildProcess } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
+import {
+  query,
+  HookCallback,
+  PreCompactHookInput,
+} from '@anthropic-ai/claude-agent-sdk';
 
 import {
   CONTAINER_TIMEOUT,
@@ -15,10 +19,7 @@ import {
   IDLE_TIMEOUT,
 } from './config.js';
 import { readEnvFile } from './env.js';
-import {
-  resolveGroupFolderPath,
-  resolveGroupIpcPath,
-} from './group-folder.js';
+import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
@@ -212,8 +213,7 @@ function formatTranscriptMarkdown(
   lines.push('');
 
   for (const msg of messages) {
-    const sender =
-      msg.role === 'user' ? 'User' : assistantName || 'Assistant';
+    const sender = msg.role === 'user' ? 'User' : assistantName || 'Assistant';
     const content =
       msg.content.length > 2000
         ? msg.content.slice(0, 2000) + '...'
@@ -288,9 +288,7 @@ function createPreCompactHook(
       if (messages.length === 0) return {};
 
       const summary = getSessionSummary(sessionId, transcriptPath);
-      const name = summary
-        ? sanitizeFilename(summary)
-        : generateFallbackName();
+      const name = summary ? sanitizeFilename(summary) : generateFallbackName();
 
       const conversationsDir = path.join(groupDir, 'conversations');
       fs.mkdirSync(conversationsDir, { recursive: true });
@@ -512,9 +510,7 @@ export async function runHostAgent(
   };
 
   // Inner query function
-  async function runQuery(
-    queryPrompt: string,
-  ): Promise<{
+  async function runQuery(queryPrompt: string): Promise<{
     lastAssistantUuid?: string;
     closedDuringQuery: boolean;
   }> {
@@ -597,9 +593,7 @@ export async function runHostAgent(
         hooks: {
           PreCompact: [
             {
-              hooks: [
-                createPreCompactHook(groupDir, input.assistantName),
-              ],
+              hooks: [createPreCompactHook(groupDir, input.assistantName)],
             },
           ],
         },
@@ -616,9 +610,7 @@ export async function runHostAgent(
 
       if (message.type === 'result') {
         const textResult =
-          'result' in message
-            ? (message as { result?: string }).result
-            : null;
+          'result' in message ? (message as { result?: string }).result : null;
 
         const output: ContainerOutput = {
           status: 'success',
@@ -677,10 +669,7 @@ export async function runHostAgent(
       // Wait for next IPC message or close
       const nextMessage = await waitForIpcMessage(group.folder);
       if (nextMessage === null) {
-        logger.debug(
-          { group: group.name },
-          'Close sentinel received, exiting',
-        );
+        logger.debug({ group: group.name }, 'Close sentinel received, exiting');
         break;
       }
 

@@ -552,9 +552,10 @@ async function main(): Promise<void> {
 
   // Start credential proxy (containers route API calls through this)
   // Not needed in host mode — SDK reads credentials directly from env
-  const proxyServer = AGENT_MODE !== 'host'
-    ? await startCredentialProxy(CREDENTIAL_PROXY_PORT, PROXY_BIND_HOST)
-    : null;
+  const proxyServer =
+    AGENT_MODE !== 'host'
+      ? await startCredentialProxy(CREDENTIAL_PROXY_PORT, PROXY_BIND_HOST)
+      : null;
 
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
