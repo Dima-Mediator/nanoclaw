@@ -18,6 +18,9 @@ groups/global/*
 !groups/main/CLAUDE.md
 !groups/global/CLAUDE.md
 
+# Claude Code local settings
+.claude/settings.local.json
+
 # Secrets
 *.keys.json
 .env

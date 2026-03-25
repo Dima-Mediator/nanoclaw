@@ -39,6 +39,22 @@ describe('extractSessionCommand', () => {
   it('is case-sensitive for the command', () => {
     expect(extractSessionCommand('/Compact', trigger)).toBeNull();
   });
+
+  it('detects bare /clear', () => {
+    expect(extractSessionCommand('/clear', trigger)).toBe('/clear');
+  });
+
+  it('detects /clear with trigger prefix', () => {
+    expect(extractSessionCommand('@Andy /clear', trigger)).toBe('/clear');
+  });
+
+  it('detects bare clear without slash', () => {
+    expect(extractSessionCommand('clear', trigger)).toBe('/clear');
+  });
+
+  it('rejects /clear with extra text', () => {
+    expect(extractSessionCommand('/clear everything', trigger)).toBeNull();
+  });
 });
 
 describe('isSessionCommandAllowed', () => {
@@ -82,6 +98,7 @@ function makeDeps(
     setTyping: vi.fn().mockResolvedValue(undefined),
     runAgent: vi.fn().mockResolvedValue('success'),
     closeStdin: vi.fn(),
+    clearSession: vi.fn(),
     advanceCursor: vi.fn(),
     formatMessages: vi.fn().mockReturnValue('<formatted>'),
     canSenderInteract: vi.fn().mockReturnValue(true),
@@ -223,6 +240,82 @@ describe('handleSessionCommand', () => {
     expect(deps.sendMessage).toHaveBeenCalledWith(
       expect.stringContaining('failed'),
     );
+  });
+
+  it('handles /clear without running agent', async () => {
+    const deps = makeDeps();
+    const result = await handleSessionCommand({
+      missedMessages: [makeMsg('/clear')],
+      isMainGroup: true,
+      groupName: 'test',
+      triggerPattern: trigger,
+      timezone: 'UTC',
+      deps,
+    });
+    expect(result).toEqual({ handled: true, success: true });
+    expect(deps.clearSession).toHaveBeenCalled();
+    expect(deps.runAgent).not.toHaveBeenCalled();
+    expect(deps.advanceCursor).toHaveBeenCalledWith('100');
+    expect(deps.sendMessage).toHaveBeenCalledWith('Context cleared.');
+  });
+
+  it('processes pre-clear messages before /clear', async () => {
+    const deps = makeDeps();
+    const msgs = [
+      makeMsg('one last thing', { timestamp: '99' }),
+      makeMsg('/clear', { timestamp: '100' }),
+    ];
+    const result = await handleSessionCommand({
+      missedMessages: msgs,
+      isMainGroup: true,
+      groupName: 'test',
+      triggerPattern: trigger,
+      timezone: 'UTC',
+      deps,
+    });
+    expect(result).toEqual({ handled: true, success: true });
+    // Pre-clear messages sent to agent
+    expect(deps.formatMessages).toHaveBeenCalledWith([msgs[0]], 'UTC');
+    expect(deps.runAgent).toHaveBeenCalledTimes(1);
+    expect(deps.runAgent).toHaveBeenCalledWith(
+      '<formatted>',
+      expect.any(Function),
+    );
+    // Then clear, no second runAgent call
+    expect(deps.clearSession).toHaveBeenCalled();
+  });
+
+  it('denies /clear from unauthorized sender', async () => {
+    const deps = makeDeps();
+    const result = await handleSessionCommand({
+      missedMessages: [makeMsg('/clear', { is_from_me: false })],
+      isMainGroup: false,
+      groupName: 'test',
+      triggerPattern: trigger,
+      timezone: 'UTC',
+      deps,
+    });
+    expect(result).toEqual({ handled: true, success: true });
+    expect(deps.sendMessage).toHaveBeenCalledWith(
+      'Session commands require admin access.',
+    );
+    expect(deps.clearSession).not.toHaveBeenCalled();
+    expect(deps.runAgent).not.toHaveBeenCalled();
+  });
+
+  it('allows /clear from is_from_me sender in non-main group', async () => {
+    const deps = makeDeps();
+    const result = await handleSessionCommand({
+      missedMessages: [makeMsg('/clear', { is_from_me: true })],
+      isMainGroup: false,
+      groupName: 'test',
+      triggerPattern: trigger,
+      timezone: 'UTC',
+      deps,
+    });
+    expect(result).toEqual({ handled: true, success: true });
+    expect(deps.clearSession).toHaveBeenCalled();
+    expect(deps.sendMessage).toHaveBeenCalledWith('Context cleared.');
   });
 
   it('returns success:false on pre-compact failure with no output', async () => {

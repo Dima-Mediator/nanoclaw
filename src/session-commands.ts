@@ -12,6 +12,7 @@ export function extractSessionCommand(
   let text = content.trim();
   text = text.replace(triggerPattern, '').trim();
   if (text === '/compact' || text === 'compact') return '/compact';
+  if (text === '/clear' || text === 'clear') return '/clear';
   return null;
 }
 
@@ -43,6 +44,8 @@ export interface SessionCommandDeps {
   closeStdin: () => void;
   advanceCursor: (timestamp: string) => void;
   formatMessages: (msgs: NewMessage[], timezone: string) => string;
+  /** Delete the session for the group so the agent starts fresh. */
+  clearSession: () => void;
   /** Whether the denied sender would normally be allowed to interact (for denial messages). */
   canSenderInteract: (msg: NewMessage) => boolean;
 }
@@ -139,6 +142,14 @@ export async function handleSessionCommand(opts: {
       }
       return { handled: true, success: false };
     }
+  }
+
+  // /clear is orchestrator-only — no agent invocation needed
+  if (command === '/clear') {
+    deps.clearSession();
+    deps.advanceCursor(cmdMsg.timestamp);
+    await deps.sendMessage('Context cleared.');
+    return { handled: true, success: true };
   }
 
   // Forward the literal slash command as the prompt (no XML formatting)

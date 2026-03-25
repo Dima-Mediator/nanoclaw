@@ -62,7 +62,56 @@ export class SlackChannel implements Channel {
       logLevel: LogLevel.ERROR,
     });
 
+    this.setupSlashCommands();
     this.setupEventHandlers();
+  }
+
+  /**
+   * Register Slack slash commands (/clear, /compact).
+   * These must also be registered in the Slack app config at api.slack.com/apps.
+   * The handler converts them into regular inbound messages so the session
+   * command pipeline in the orchestrator handles auth + execution.
+   */
+  private setupSlashCommands(): void {
+    const handleSlashCommand = async ({
+      command,
+      ack,
+    }: {
+      command: {
+        command: string;
+        channel_id: string;
+        channel_name: string;
+        user_id: string;
+        text: string;
+      };
+      ack: () => Promise<void>;
+    }) => {
+      await ack();
+
+      const jid = `slack:${command.channel_id}`;
+      const groups = this.opts.registeredGroups();
+      if (!groups[jid]) return;
+
+      const timestamp = new Date().toISOString();
+      const senderName =
+        (await this.resolveUserName(command.user_id)) || command.user_id;
+
+      // Inject as a regular message — the orchestrator's session command
+      // detection picks it up via extractSessionCommand()
+      this.opts.onMessage(jid, {
+        id: `slash-${Date.now()}`,
+        chat_jid: jid,
+        sender: command.user_id,
+        sender_name: senderName,
+        content: command.command, // e.g. "/clear"
+        timestamp,
+        is_from_me: command.user_id === this.botUserId,
+        is_bot_message: false,
+      });
+    };
+
+    this.app.command('/clear', handleSlashCommand);
+    this.app.command('/compact', handleSlashCommand);
   }
 
   private setupEventHandlers(): void {

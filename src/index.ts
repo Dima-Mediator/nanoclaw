@@ -39,6 +39,7 @@ import {
   initDatabase,
   setRegisteredGroup,
   setRouterState,
+  deleteSession,
   setSession,
   storeChatMetadata,
   storeMessage,
@@ -75,6 +76,7 @@ let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
+const contextCleared: Record<string, boolean> = {};
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
@@ -194,6 +196,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         saveState();
       },
       formatMessages,
+      clearSession: () => {
+        delete sessions[group.folder];
+        deleteSession(group.folder);
+        contextCleared[chatJid] = true;
+      },
       canSenderInteract: (msg) => {
         const hasTrigger = TRIGGER_PATTERN.test(msg.content.trim());
         const reqTrigger = !isMainGroup && group.requiresTrigger !== false;
@@ -223,7 +230,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   }
 
-  const prompt = formatMessages(missedMessages, TIMEZONE);
+  let prompt = formatMessages(missedMessages, TIMEZONE);
+  if (contextCleared[chatJid]) {
+    delete contextCleared[chatJid];
+    prompt =
+      '<system-note>Context was cleared. This is a fresh start — previous messages are not loaded. If you need earlier history, use the read_channel_history MCP tool.</system-note>\n' +
+      prompt;
+  }
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
