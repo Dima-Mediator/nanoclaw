@@ -5,6 +5,7 @@
  */
 import { ChildProcess } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import {
   query,
@@ -402,12 +403,14 @@ export async function runHostAgent(
     'ANTHROPIC_API_KEY',
     'CLAUDE_CODE_OAUTH_TOKEN',
     'ANTHROPIC_AUTH_TOKEN',
+    'GH_TOKEN',
   ]);
 
   // Build SDK environment
   const sdkEnv: Record<string, string | undefined> = {
     ...process.env,
     HOME: path.dirname(sessionsDir), // sessions/{folder}/ — SDK finds .claude/ here
+    GH_CONFIG_DIR: process.env.GH_CONFIG_DIR || path.join(os.homedir(), '.config', 'gh'),
     TZ: process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone,
     NANOCLAW_IS_MAIN: input.isMain ? '1' : '0',
   };
@@ -421,6 +424,9 @@ export async function runHostAgent(
   }
   if (secrets.ANTHROPIC_AUTH_TOKEN) {
     sdkEnv.ANTHROPIC_AUTH_TOKEN = secrets.ANTHROPIC_AUTH_TOKEN;
+  }
+  if (secrets.GH_TOKEN) {
+    sdkEnv.GH_TOKEN = secrets.GH_TOKEN;
   }
 
   // MCP server — run the TypeScript source via tsx at runtime
@@ -593,6 +599,7 @@ export async function runHostAgent(
             args: ['tsx', mcpServerPath],
             env: {
               NANOCLAW_CHAT_JID: input.chatJid,
+              NANOCLAW_CHAT_NAME: group.name,
               NANOCLAW_GROUP_FOLDER: input.groupFolder,
               NANOCLAW_IS_MAIN: input.isMain ? '1' : '0',
               NANOCLAW_IPC_DIR: ipcDir,

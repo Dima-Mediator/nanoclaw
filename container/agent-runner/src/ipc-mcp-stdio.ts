@@ -17,6 +17,7 @@ const TASKS_DIR = path.join(IPC_DIR, 'tasks');
 
 // Context from environment variables (set by the agent runner)
 const chatJid = process.env.NANOCLAW_CHAT_JID!;
+const chatName = process.env.NANOCLAW_CHAT_NAME || '';
 const groupFolder = process.env.NANOCLAW_GROUP_FOLDER!;
 const isMain = process.env.NANOCLAW_IS_MAIN === '1';
 
@@ -342,16 +343,19 @@ Time range is specified as minutes relative to now — this prevents unbounded r
 
 • minutes_ago: How far back to read (e.g., 60 = last hour). Required.
 • to_minutes_ago: End of time window in minutes ago (default: 0 = now). Use to read a specific window.
-• channel_jid: Channel JID (e.g., "slack:C0123456789") OR channel name (e.g., "healthcheck-prd" or "#healthcheck-prd"). Names are resolved automatically.
+• channel_jid: Channel JID or name. Optional — defaults to this channel (${chatName ? `"${chatName}" / ` : ''}${chatJid}).
 • limit: Max messages to return (default: 100, max: 200).
 
-Example: Read last 30 minutes of #healthcheck-prd:
+Example: Read last 30 minutes of this channel:
+  { minutes_ago: 30 }
+
+Example: Read another channel:
   { channel_jid: "healthcheck-prd", minutes_ago: 30 }
 
 Example: Read messages from 2h ago to 1h ago:
   { channel_jid: "slack:C...", minutes_ago: 120, to_minutes_ago: 60 }`,
   {
-    channel_jid: z.string().describe('Channel JID (e.g., "slack:C0123456789") or channel name (e.g., "healthcheck-prd", "#healthcheck-prd")'),
+    channel_jid: z.string().optional().describe(`Channel JID or name. Defaults to this channel (${chatName ? `"${chatName}" / ` : ''}${chatJid}).`),
     minutes_ago: z.number().min(1).max(1440).describe('How far back to read (minutes). Max 1440 (24h).'),
     to_minutes_ago: z.number().min(0).default(0).describe('End of window in minutes ago (default: 0 = now)'),
     limit: z.number().min(1).max(200).default(100).describe('Max messages to return'),
@@ -385,7 +389,7 @@ Example: Read messages from 2h ago to 1h ago:
       requestFile,
       JSON.stringify({
         type: 'read_channel_history',
-        jid: args.channel_jid,
+        jid: args.channel_jid || chatJid,
         oldest,
         latest,
         limit: args.limit,
