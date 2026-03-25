@@ -410,7 +410,8 @@ export async function runHostAgent(
   const sdkEnv: Record<string, string | undefined> = {
     ...process.env,
     HOME: path.dirname(sessionsDir), // sessions/{folder}/ — SDK finds .claude/ here
-    GH_CONFIG_DIR: process.env.GH_CONFIG_DIR || path.join(os.homedir(), '.config', 'gh'),
+    GH_CONFIG_DIR:
+      process.env.GH_CONFIG_DIR || path.join(os.homedir(), '.config', 'gh'),
     TZ: process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone,
     NANOCLAW_IS_MAIN: input.isMain ? '1' : '0',
   };
