@@ -461,12 +461,10 @@ async function startMessageLoop(): Promise<void> {
             // Only close active container if the sender is authorized — otherwise an
             // untrusted user could kill in-flight work by sending /compact (DoS).
             // closeStdin no-ops internally when no container is active.
-            if (
-              isSessionCommandAllowed(
-                isMainGroup,
-                loopCmdMsg.is_from_me === true,
-              )
-            ) {
+            // Allow closeStdin if: main group, own message, or trigger not required
+            // (mirrors canSenderInteract logic in processGroupMessages)
+            const reqTrigger = !isMainGroup && group.requiresTrigger !== false;
+            if (!reqTrigger || loopCmdMsg.is_from_me === true || isMainGroup) {
               queue.closeStdin(chatJid);
             }
             // Enqueue so processGroupMessages handles auth + cursor advancement.
