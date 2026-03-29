@@ -37,6 +37,8 @@ export class SlackChannel implements Channel {
   private outgoingQueue: Array<{ jid: string; text: string }> = [];
   private flushing = false;
   private userNameCache = new Map<string, string>();
+  private healthCheckTimer: ReturnType<typeof setInterval> | undefined;
+  private reconnecting = false;
 
   private opts: SlackChannelOpts;
 
@@ -105,7 +107,7 @@ export class SlackChannel implements Channel {
         sender_name: senderName,
         content: command.command, // e.g. "/clear"
         timestamp,
-        is_from_me: command.user_id === this.botUserId,
+        is_from_me: true, // Slash commands are always trusted (intentional user action)
         is_bot_message: false,
       });
     };
@@ -203,6 +205,12 @@ export class SlackChannel implements Channel {
 
     // Sync channel names on startup
     await this.syncChannelMetadata();
+
+    // Start health check watchdog.
+    // @slack/socket-mode treats DNS failures as unrecoverable and silently
+    // stops reconnecting, leaving the process running but deaf to Slack.
+    // This timer detects that state and forces a full reconnect.
+    this.startHealthCheck();
   }
 
   async sendMessage(jid: string, text: string): Promise<void> {
@@ -249,6 +257,7 @@ export class SlackChannel implements Channel {
 
   async disconnect(): Promise<void> {
     this.connected = false;
+    if (this.healthCheckTimer) clearInterval(this.healthCheckTimer);
     await this.app.stop();
   }
 
@@ -399,6 +408,80 @@ export class SlackChannel implements Channel {
       logger.error({ jid, err }, 'Failed to read Slack channel history');
       return { ok: false, error: errMsg };
     }
+  }
+
+  /**
+   * Check whether the socket-mode WebSocket is actually alive.
+   * auth.test() only validates the HTTP API — the WebSocket can be dead
+   * while HTTP still works, leaving the bot deaf to events.
+   */
+  private isSocketModeAlive(): boolean {
+    try {
+      // Access internal Bolt receiver → SocketModeClient → SlackWebSocket
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const receiver = (this.app as any).receiver;
+      const socketClient = receiver?.client;
+      const ws = socketClient?.websocket;
+      if (ws && typeof ws.isActive === 'function') {
+        return ws.isActive();
+      }
+      // Can't determine state — assume alive to avoid false positives
+      return true;
+    } catch {
+      return true;
+    }
+  }
+
+  /**
+   * Force-reconnect the socket-mode connection.
+   */
+  private async forceReconnect(reason: string): Promise<void> {
+    if (this.reconnecting) return;
+    logger.warn({ reason }, 'Slack health check: forcing reconnect');
+    this.reconnecting = true;
+    this.connected = false;
+    try {
+      await this.app.stop().catch(() => {});
+      await this.app.start();
+      const auth = await this.app.client.auth.test();
+      this.botUserId = auth.user_id as string;
+      this.connected = true;
+      logger.info(
+        { botUserId: this.botUserId },
+        'Slack reconnected after health check failure',
+      );
+      await this.flushOutgoingQueue();
+    } catch (reconnectErr) {
+      logger.error(
+        { err: reconnectErr },
+        'Slack reconnect failed, will retry next health check',
+      );
+    } finally {
+      this.reconnecting = false;
+    }
+  }
+
+  /**
+   * Periodically verify the Slack WebSocket is alive.
+   * Checks both socket-mode WebSocket state and HTTP API connectivity.
+   * If socket-mode has silently died (e.g. DNS failure, network blip),
+   * tears down and restarts the Bolt app.
+   */
+  private startHealthCheck(): void {
+    this.healthCheckTimer = setInterval(async () => {
+      // Primary check: is the socket-mode WebSocket still active?
+      if (!this.isSocketModeAlive()) {
+        await this.forceReconnect('socket-mode WebSocket not active');
+        return;
+      }
+
+      // Secondary check: can we reach the Slack API?
+      try {
+        await this.app.client.auth.test();
+      } catch (err) {
+        await this.forceReconnect(`auth.test failed: ${err}`);
+      }
+    }, 30_000);
   }
 
   private async flushOutgoingQueue(): Promise<void> {

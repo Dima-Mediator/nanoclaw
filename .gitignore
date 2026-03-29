@@ -39,3 +39,4 @@ groups/global/*
 .nanoclaw/
 
 agents-sdk-docs
+.ops/

@@ -439,6 +439,21 @@ export async function runHostAgent(
     'ipc-mcp-stdio.ts',
   );
 
+  // Validate AGENT_CWD is accessible before using it — macOS TCC restrictions
+  // can cause ~/Documents/ to hang indefinitely for launchd services
+  let effectiveCwd = groupDir;
+  if (AGENT_CWD) {
+    try {
+      fs.readdirSync(AGENT_CWD);
+      effectiveCwd = AGENT_CWD;
+    } catch (err) {
+      logger.warn(
+        { cwd: AGENT_CWD, err },
+        'AGENT_CWD inaccessible, falling back to group dir',
+      );
+    }
+  }
+
   // Additional directories (from mount config)
   const additionalDirs: string[] = [];
   if (!input.isMain) {
@@ -450,7 +465,7 @@ export async function runHostAgent(
 
   // When AGENT_CWD overrides cwd, add the group dir as an additional directory
   // so the agent still picks up the group's CLAUDE.md and context
-  if (AGENT_CWD) {
+  if (effectiveCwd !== groupDir) {
     additionalDirs.push(groupDir);
   }
 
@@ -515,6 +530,7 @@ export async function runHostAgent(
     } catch {
       /* ignore */
     }
+    // Abort the SDK query — this kills the CLI subprocess and stops iteration
     killController.abort();
   };
 
@@ -557,7 +573,8 @@ export async function runHostAgent(
     for await (const message of query({
       prompt: stream,
       options: {
-        cwd: AGENT_CWD || groupDir,
+        abortController: killController,
+        cwd: effectiveCwd,
         additionalDirectories:
           additionalDirs.length > 0 ? additionalDirs : undefined,
         resume: sessionId,
