@@ -39,6 +39,7 @@ export class SlackChannel implements Channel {
   private userNameCache = new Map<string, string>();
   private healthCheckTimer: ReturnType<typeof setInterval> | undefined;
   private reconnecting = false;
+  private lastReconnectAt = 0;
 
   private opts: SlackChannelOpts;
 
@@ -442,10 +443,17 @@ export class SlackChannel implements Channel {
     this.connected = false;
     try {
       await this.app.stop().catch(() => {});
-      await this.app.start();
+      // Timeout on app.start() — if it hangs, bail and retry next cycle
+      await Promise.race([
+        this.app.start(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('app.start() timed out')), 30_000),
+        ),
+      ]);
       const auth = await this.app.client.auth.test();
       this.botUserId = auth.user_id as string;
       this.connected = true;
+      this.lastReconnectAt = Date.now();
       logger.info(
         { botUserId: this.botUserId },
         'Slack reconnected after health check failure',
@@ -469,6 +477,10 @@ export class SlackChannel implements Channel {
    */
   private startHealthCheck(): void {
     this.healthCheckTimer = setInterval(async () => {
+      // Grace period: skip checks for 60s after a reconnect to let the new
+      // WebSocket fully establish before we evaluate its state.
+      if (Date.now() - this.lastReconnectAt < 60_000) return;
+
       // Primary check: is the socket-mode WebSocket still active?
       if (!this.isSocketModeAlive()) {
         await this.forceReconnect('socket-mode WebSocket not active');
