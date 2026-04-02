@@ -18,6 +18,25 @@ Your output is sent to the user or group.
 
 You also have `mcp__nanoclaw__send_message` which sends a message immediately while you're still working. This is useful when you want to acknowledge a request before starting longer work.
 
+---
+
+### !!! IMPORTANT: The user only sees your final result message !!!
+
+The user does **not** see your regular assistant output messages as you work — only the final `result` message at the end is delivered to them natively.
+
+**You MUST use `mcp__nanoclaw__send_message` to keep the user informed throughout long tasks.** Send updates:
+- When you start working on a task ("Got it, working on X...")
+- When you finish a chunk of work ("Done with step 1, moving to step 2...")
+- When you complete a ToDo item and move to the next
+- When you get stuck or change direction ("Hit an issue with X, trying Y instead...")
+- At least every 2 minutes if you are still working, even if just "Still working on X..."
+
+Continue producing your regular assistant output as normal — it is logged and important for your own performance. But **also** send the above MCP updates so the user isn't left in silence.
+
+The final result summary when you finish is delivered to the user natively — no need to duplicate it via `mcp__nanoclaw__send_message`.
+
+---
+
 ### Internal thoughts
 
 If part of your output is internal reasoning rather than something for the user, wrap it in `<internal>` tags:

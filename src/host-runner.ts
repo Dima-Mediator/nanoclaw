@@ -9,6 +9,7 @@ import os from 'os';
 import path from 'path';
 import {
   query,
+  Query,
   HookCallback,
   PreCompactHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
@@ -517,7 +518,8 @@ export async function runHostAgent(
   const configTimeout = group.containerConfig?.timeout || CONTAINER_TIMEOUT;
   const timeoutMs = Math.max(configTimeout, IDLE_TIMEOUT + 30_000);
 
-  const killController = new AbortController();
+  // Reference to the active Query so killOnTimeout can force-close it
+  let currentQuery: Query | null = null;
 
   const killOnTimeout = () => {
     timedOut = true;
@@ -530,8 +532,11 @@ export async function runHostAgent(
     } catch {
       /* ignore */
     }
-    // Abort the SDK query — this kills the CLI subprocess and stops iteration
-    killController.abort();
+    // Force-close the Query — this terminates the Claude subprocess and stops iteration
+    if (currentQuery) {
+      currentQuery.close();
+      currentQuery = null;
+    }
   };
 
   let timeout = setTimeout(killOnTimeout, timeoutMs);
@@ -570,10 +575,9 @@ export async function runHostAgent(
 
     let lastAssistantUuid: string | undefined;
 
-    for await (const message of query({
+    const q = query({
       prompt: stream,
       options: {
-        abortController: killController,
         cwd: effectiveCwd,
         additionalDirectories:
           additionalDirs.length > 0 ? additionalDirs : undefined,
@@ -632,33 +636,40 @@ export async function runHostAgent(
           ],
         },
       },
-    })) {
-      if (message.type === 'assistant' && 'uuid' in message) {
-        lastAssistantUuid = (message as { uuid: string }).uuid;
-      }
+    });
 
-      if (message.type === 'system' && message.subtype === 'init') {
-        newSessionId = message.session_id;
-        sessionId = newSessionId;
-      }
+    currentQuery = q;
+    try {
+      for await (const message of q) {
+        if (message.type === 'assistant' && 'uuid' in message) {
+          lastAssistantUuid = (message as { uuid: string }).uuid;
+        }
 
-      if (message.type === 'result') {
-        const textResult =
-          'result' in message ? (message as { result?: string }).result : null;
+        if (message.type === 'system' && message.subtype === 'init') {
+          newSessionId = message.session_id;
+          sessionId = newSessionId;
+        }
 
-        const output: ContainerOutput = {
-          status: 'success',
-          result: textResult || null,
-          newSessionId,
-        };
+        if (message.type === 'result') {
+          const textResult =
+            'result' in message ? (message as { result?: string }).result : null;
 
-        hadOutput = true;
-        resetTimeout();
+          const output: ContainerOutput = {
+            status: 'success',
+            result: textResult || null,
+            newSessionId,
+          };
 
-        if (onOutput) {
-          outputChain = outputChain.then(() => onOutput(output));
+          hadOutput = true;
+          resetTimeout();
+
+          if (onOutput) {
+            outputChain = outputChain.then(() => onOutput(output));
+          }
         }
       }
+    } finally {
+      currentQuery = null;
     }
 
     ipcPolling = false;
@@ -717,6 +728,11 @@ export async function runHostAgent(
       'Host agent error',
     );
 
+    // Send timeout notification if applicable
+    if (timedOut && onOutput) {
+      await sendTimeoutNotification();
+    }
+
     return {
       status: 'error',
       result: null,
@@ -727,6 +743,11 @@ export async function runHostAgent(
 
   clearTimeout(timeout);
   const duration = Date.now() - startTime;
+
+  // Send timeout notification (clean exit via close())
+  if (timedOut && onOutput) {
+    await sendTimeoutNotification();
+  }
 
   if (timedOut && !hadOutput) {
     return {
@@ -749,4 +770,14 @@ export async function runHostAgent(
     result: null,
     newSessionId,
   };
+
+  async function sendTimeoutNotification(): Promise<void> {
+    if (!onOutput) return;
+    const mins = Math.round(timeoutMs / 60000);
+    await onOutput({
+      status: 'error',
+      result: `⚠️ Session timed out after ${mins} min. The agent was interrupted and the task may be incomplete.`,
+      newSessionId,
+    }).catch(() => {});
+  }
 }
